@@ -1,0 +1,542 @@
+---
+title: "STAT 652 Final Project: Customer Churn Classification"
+author: "Nikhil Kumar"
+date: "March 15 2026"
+format:
+  pdf:
+    embed-resources: true
+    toc: true
+execute:
+  echo: false
+  warning: false
+  message: false
+---
+
+## STEP : 1 DEFINING THE PROBLEM
+
+The goal of this project is to predict customer churn using the other variables in the dataset.
+
+-   Response variable: Churn
+-   Type of response: binary with two classes No and Yes
+-   Number of observations: more than 100
+-   Main scoring metric: ROC AUC
+-   Other reported metrics: accuracy, precision, recall, and F1 score
+
+The best model will be selected based on the highest ROC AUC. If two models perform very similarly, then F1 score and accuracy will be used to decide which model is better.Step 2: Collect and understand the data\
+
+## STEP : 2 COLLECTING AND UNDERSTANDING THE DATA
+
+The dataset contains 7,043 observations and 21 variables. The response variable is Churn and the class distribution shows that about 73.5 percent of customers did not churn, while about 26.5 percent did churn. This means the data is somewhat imbalanced because non churn cases are more common.
+
+The summary statistics show a clear difference between the two groups. Customers who did not churn had much higher average tenure and higher total charges while customers who churned had higher monthly charges on average. This suggests that customers who stay longer are less likely to leave, and customers with higher monthly costs may be more likely to churn.
+
+The contract plot also supports this pattern. Customers with month to month contracts have the highest churn rate while customers with one year and especially two year contracts have much lower churn rates. This means contract type seems to be an important predictor of churn.
+
+```{r}
+library(tidyverse)
+library(tidymodels)
+library(discrim)
+
+set.seed(627)
+theme_set(theme_minimal())
+```
+
+```{r}
+RAW_DTA<- read.csv("CUSTOMER_CHURN.csv")
+dim(RAW_DTA)
+names(RAW_DTA)
+```
+
+```{r}
+RAW_DTA |>
+  count(Churn) |>
+  mutate(prop = n / sum(n))
+```
+
+```{r}
+FACTOR_VARIABLES <- c(
+  "gender", "Partner", "Dependents", "PhoneService", "MultipleLines",
+  "InternetService", "OnlineSecurity", "OnlineBackup", "DeviceProtection",
+  "TechSupport", "StreamingTV", "StreamingMovies", "Contract",
+  "PaperlessBilling", "PaymentMethod", "Churn"
+)
+
+CLEAN_DTA <- RAW_DTA |>
+  mutate(
+    TotalCharges = as.character(TotalCharges),
+    TotalCharges = na_if(trimws(TotalCharges), ""),
+    TotalCharges = as.numeric(TotalCharges),
+    SeniorCitizen = factor(SeniorCitizen, levels = c(0, 1), labels = c("No", "Yes"))
+  ) |>
+  mutate(across(all_of(FACTOR_VARIABLES), as.factor)) |>
+  mutate(Churn = factor(Churn, levels = c("No", "Yes")))
+
+glimpse(CLEAN_DTA)
+
+CLEAN_DTA |>
+  group_by(Churn) |>
+  summarise(
+    mean_tenure = mean(tenure, na.rm = TRUE),
+    mean_monthly = mean(MonthlyCharges, na.rm = TRUE),
+    mean_total = mean(TotalCharges, na.rm = TRUE)
+  )
+```
+
+```{r}
+CLEAN_DTA |>
+  ggplot(aes(x = Contract, fill = Churn)) +
+  geom_bar(position = "fill") +
+  scale_y_continuous(labels = scales::percent_format()) +
+  labs(
+    title = "CHURN RATE BY TYPE OF CONTRACT",
+    x = "CONTRACT",
+    y = "PROPORTION"
+  )
+```
+
+## STEP : 3 PREPAREING THE DATA
+
+In this step I prepared the data for modeling. I converted the categorical variables into factors and handled missing values in TotalCharges. I also treated customerID as an identifier so it would not be used as a predictor in the models.
+
+Next I split the data into training and test sets using an 80 20 split. The training set was used to fit the models and the test set was used to evaluate performance on unseen data. I also used recipes to handle imputation create dummy variables and normalize predictors for models that need numeric inputs.
+
+```{r}
+CLEAN_DTA_SPLIT <- initial_split(CLEAN_DTA, prop = 0.80, strata = Churn)
+CLEAN_DTA_TRAIN <- training(CLEAN_DTA_SPLIT)
+CLEAN_DTA_TEST <- testing(CLEAN_DTA_SPLIT)
+
+nrow(CLEAN_DTA_TRAIN)
+nrow(CLEAN_DTA_TEST)
+```
+
+```{r}
+BASIC_RECIPE <- recipe(Churn ~ ., data = CLEAN_DTA_TRAIN) |>
+  update_role(customerID, new_role = "id") |>
+  step_impute_median(all_numeric_predictors()) |>
+  step_impute_mode(all_nominal_predictors()) |>
+  step_zv(all_predictors())
+
+FINAL_RECIPE <- BASIC_RECIPE |>
+  step_dummy(all_nominal_predictors()) |>
+  step_normalize(all_numeric_predictors())
+```
+
+-   customerID is treated as an identifier, not a predictor.
+-   Missing TotalCharges values are handled with median imputation.
+-   Dummy variables and normalization are used for models that need numeric predictors.
+
+## STEP : 4 FITTING AND COMPAREING MODELS
+
+I fit all of the classification models covered in class. These were Null Model, Logistic Regression ,LASSO, k Nearest Neighbors ,Neural Network ,Random Forest ,Boosted C5.0 and Naive Bayes.
+
+The comparison table shows that Logistic Regression had the best overall performance. It had the highest ROC AUC and also strong accuracy precision recall and F1 score. Boosted C5.0 and LASSO also performed well and were close behind. The Null Model performed the worst because it did not identify churn cases well. Overall the real classification models performed much better than the baseline model.
+
+The models fit here are:
+
+1.  Null Model\
+2.  Logistic Regression\
+3.  Regularized Logistic Regression (LASSO)\
+4.  k-Nearest Neighbors\
+5.  Neural Network\
+6.  Random Forest\
+7.  Boosted C5.0\
+8.  Naive Bayes
+
+```{r}
+# MODELS
+NULL_MODEL <- null_model() |>
+  set_engine("parsnip") |>
+  set_mode("classification")
+
+LOGISTIC_MODEL <- logistic_reg() |>
+  set_engine("glm") |>
+  set_mode("classification")
+
+LASSO_MODEL <- logistic_reg(penalty = 0.01, mixture = 1) |>
+  set_engine("glmnet") |>
+  set_mode("classification")
+
+KNN_MODEL <- nearest_neighbor(
+  neighbors = 15,
+  weight_func = "rectangular",
+  dist_power = 2
+) |>
+  set_engine("kknn") |>
+  set_mode("classification")
+
+NEURAL_NET_MODEL <- mlp(hidden_units = 5) |>
+  set_engine("nnet", trace = FALSE, MaxNWts = 10000) |>
+  set_mode("classification")
+
+RANDOM_FOREST_MODEL <- rand_forest(trees = 999, mtry = 9, min_n = 5) |>
+  set_engine("ranger", importance = "impurity") |>
+  set_mode("classification")
+
+C50_MODEL <- boost_tree(trees = 100, min_n = 5) |>
+  set_engine("C5.0") |>
+  set_mode("classification")
+
+NAIVE_BAYES_MODEL <- naive_Bayes() |>
+  set_engine("naivebayes") |>
+  set_mode("classification")
+```
+
+```{r}
+# WORKFLOWS
+NULL_WORKFLOW <- workflow() |>
+  add_recipe(BASIC_RECIPE) |>
+  add_model(NULL_MODEL)
+
+LOGISTIC_WORKFLOW <- workflow() |>
+  add_recipe(BASIC_RECIPE) |>
+  add_model(LOGISTIC_MODEL)
+
+LASSO_WORKFLOW <- workflow() |>
+  add_recipe(FINAL_RECIPE) |>
+  add_model(LASSO_MODEL)
+
+KNN_WORKFLOW <- workflow() |>
+  add_recipe(FINAL_RECIPE) |>
+  add_model(KNN_MODEL)
+
+NEURAL_NET_WORKFLOW <- workflow() |>
+  add_recipe(FINAL_RECIPE) |>
+  add_model(NEURAL_NET_MODEL)
+
+RANDOM_FOREST_WORKFLOW <- workflow() |>
+  add_recipe(BASIC_RECIPE) |>
+  add_model(RANDOM_FOREST_MODEL)
+
+C50_WORKFLOW <- workflow() |>
+  add_recipe(BASIC_RECIPE) |>
+  add_model(C50_MODEL)
+
+NAIVE_BAYES_WORKFLOW <- workflow() |>
+  add_recipe(BASIC_RECIPE) |>
+  add_model(NAIVE_BAYES_MODEL)
+```
+
+```{r}
+EVALUATE_MODEL <- function(FITTED_MODEL, TEST_DATA, MODEL_NAME) {
+  MODEL_PREDICTIONS <- TEST_DATA |>
+  dplyr::select(customerID, Churn) |>
+  bind_cols(predict(FITTED_MODEL, new_data = TEST_DATA, type = "class")) |>
+  bind_cols(predict(FITTED_MODEL, new_data = TEST_DATA, type = "prob")) |>
+  dplyr::rename(PREDICTED_CHURN = .pred_class)
+
+  PRECISION_VALUE <- precision_vec(
+    truth = MODEL_PREDICTIONS$Churn,
+    estimate = MODEL_PREDICTIONS$PREDICTED_CHURN,
+    event_level = "second"
+  )
+  if (is.na(PRECISION_VALUE)) PRECISION_VALUE <- 0
+
+  RECALL_VALUE <- recall_vec(
+    truth = MODEL_PREDICTIONS$Churn,
+    estimate = MODEL_PREDICTIONS$PREDICTED_CHURN,
+    event_level = "second"
+  )
+  if (is.na(RECALL_VALUE)) RECALL_VALUE <- 0
+
+  F1_VALUE <- f_meas_vec(
+    truth = MODEL_PREDICTIONS$Churn,
+    estimate = MODEL_PREDICTIONS$PREDICTED_CHURN,
+    event_level = "second"
+  )
+  if (is.na(F1_VALUE)) F1_VALUE <- 0
+
+  AUC_VALUE <- roc_auc_vec(
+    truth = MODEL_PREDICTIONS$Churn,
+    estimate = MODEL_PREDICTIONS$.pred_Yes,
+    event_level = "second"
+  )
+  if (is.na(AUC_VALUE)) AUC_VALUE <- 0.5
+
+  METRICS_TABLE <- tibble(
+    Model = MODEL_NAME,
+    Accuracy = accuracy_vec(MODEL_PREDICTIONS$Churn, MODEL_PREDICTIONS$PREDICTED_CHURN),
+    Precision = PRECISION_VALUE,
+    Recall = RECALL_VALUE,
+    `F1 Score` = F1_VALUE,
+    `ROC AUC` = AUC_VALUE
+  )
+
+  CONFUSION_TABLE <- MODEL_PREDICTIONS |>
+    conf_mat(truth = Churn, estimate = PREDICTED_CHURN)
+
+  list(
+    predictions = MODEL_PREDICTIONS,
+    metrics = METRICS_TABLE,
+    confusion = CONFUSION_TABLE
+  )
+}
+
+EVALUATE_NULL_MODEL <- function(TRAIN_DATA, TEST_DATA) {
+  PROB_YES <- mean(TRAIN_DATA$Churn == "Yes")
+  PROB_NO  <- 1 - PROB_YES
+  MAJORITY_CLASS <- if_else(PROB_YES >= 0.5, "Yes", "No")
+
+  NULL_PREDICTIONS <- TEST_DATA |>
+    transmute(
+      customerID,
+      Churn,
+      PREDICTED_CHURN = factor(MAJORITY_CLASS, levels = levels(TEST_DATA$Churn)),
+      .pred_No = PROB_NO,
+      .pred_Yes = PROB_YES
+    )
+
+  PRECISION_VALUE <- precision_vec(
+    truth = NULL_PREDICTIONS$Churn,
+    estimate = NULL_PREDICTIONS$PREDICTED_CHURN,
+    event_level = "second"
+  )
+  if (is.na(PRECISION_VALUE)) PRECISION_VALUE <- 0
+
+  RECALL_VALUE <- recall_vec(
+    truth = NULL_PREDICTIONS$Churn,
+    estimate = NULL_PREDICTIONS$PREDICTED_CHURN,
+    event_level = "second"
+  )
+  if (is.na(RECALL_VALUE)) RECALL_VALUE <- 0
+
+  F1_VALUE <- f_meas_vec(
+    truth = NULL_PREDICTIONS$Churn,
+    estimate = NULL_PREDICTIONS$PREDICTED_CHURN,
+    event_level = "second"
+  )
+  if (is.na(F1_VALUE)) F1_VALUE <- 0
+
+  METRICS_TABLE <- tibble(
+    Model = "Null Model",
+    Accuracy = accuracy_vec(NULL_PREDICTIONS$Churn, NULL_PREDICTIONS$PREDICTED_CHURN),
+    Precision = PRECISION_VALUE,
+    Recall = RECALL_VALUE,
+    `F1 Score` = F1_VALUE,
+    `ROC AUC` = 0.5
+  )
+
+  CONFUSION_TABLE <- NULL_PREDICTIONS |>
+    conf_mat(truth = Churn, estimate = PREDICTED_CHURN)
+
+  list(
+    predictions = NULL_PREDICTIONS,
+    metrics = METRICS_TABLE,
+    confusion = CONFUSION_TABLE
+  )
+}
+```
+
+```{r}
+LOGISTIC_FIT       <- fit(LOGISTIC_WORKFLOW, data = CLEAN_DTA_TRAIN)
+LASSO_FIT          <- fit(LASSO_WORKFLOW, data = CLEAN_DTA_TRAIN)
+KNN_FIT            <- fit(KNN_WORKFLOW, data = CLEAN_DTA_TRAIN)
+NEURAL_NET_FIT     <- fit(NEURAL_NET_WORKFLOW, data = CLEAN_DTA_TRAIN)
+RANDOM_FOREST_FIT  <- fit(RANDOM_FOREST_WORKFLOW, data = CLEAN_DTA_TRAIN)
+C50_FIT            <- fit(C50_WORKFLOW, data = CLEAN_DTA_TRAIN)
+NAIVE_BAYES_FIT    <- fit(NAIVE_BAYES_WORKFLOW, data = CLEAN_DTA_TRAIN)
+```
+
+```{r}
+library(dplyr)
+MODEL_RESULTS <- list()
+
+MODEL_RESULTS[["Null Model"]] <- EVALUATE_NULL_MODEL(CLEAN_DTA_TRAIN, CLEAN_DTA_TEST)
+
+MODEL_RESULTS[["Logistic Regression"]] <- EVALUATE_MODEL(LOGISTIC_FIT, CLEAN_DTA_TEST, "Logistic Regression")
+
+MODEL_RESULTS[["Regularized Logistic Regression (LASSO)"]] <- EVALUATE_MODEL(LASSO_FIT, CLEAN_DTA_TEST, "Regularized Logistic Regression (LASSO)")
+
+MODEL_RESULTS[["k-Nearest Neighbors"]] <- EVALUATE_MODEL(KNN_FIT, CLEAN_DTA_TEST, "k-Nearest Neighbors")
+
+MODEL_RESULTS[["Neural Network"]] <- EVALUATE_MODEL(NEURAL_NET_FIT, CLEAN_DTA_TEST, "Neural Network")
+
+MODEL_RESULTS[["Random Forest"]] <- EVALUATE_MODEL(RANDOM_FOREST_FIT, CLEAN_DTA_TEST, "Random Forest")
+
+MODEL_RESULTS[["Boosted C5.0"]] <- EVALUATE_MODEL(C50_FIT, CLEAN_DTA_TEST, "Boosted C5.0")
+
+MODEL_RESULTS[["Naive Bayes"]] <- EVALUATE_MODEL(NAIVE_BAYES_FIT, CLEAN_DTA_TEST, "Naive Bayes")
+```
+
+```{r}
+# COMPARISION TABLE 
+METRICES_ALL <- bind_rows(
+  MODEL_RESULTS[["Null Model"]]$metrics,
+  MODEL_RESULTS[["Logistic Regression"]]$metrics,
+  MODEL_RESULTS[["Regularized Logistic Regression (LASSO)"]]$metrics,
+  MODEL_RESULTS[["k-Nearest Neighbors"]]$metrics,
+  MODEL_RESULTS[["Neural Network"]]$metrics,
+  MODEL_RESULTS[["Random Forest"]]$metrics,
+  MODEL_RESULTS[["Boosted C5.0"]]$metrics,
+  MODEL_RESULTS[["Naive Bayes"]]$metrics
+) |>
+  arrange(desc(`ROC AUC`), desc(`F1 Score`), desc(Accuracy)) |>
+  mutate(across(where(is.numeric), ~ round(.x, 4)))
+
+METRICES_ALL
+```
+
+## VISUALISATION
+
+**ROC CURVES**
+
+As we can see the plot compares how well all models separate churn and non churn customers. The better models stay closer to the top left corner. In this plot Boosted C5.0 Logistic Regression and LASSO are the strongest models because their curves stay above most of the others. The Null Model follows the diagonal line which shows no real classification power.
+
+```{r}
+ROC_DATA <- bind_rows(
+  lapply(names(MODEL_RESULTS), function(x) {
+    roc_curve(
+      MODEL_RESULTS[[x]]$predictions,
+      truth = Churn,
+      .pred_Yes,
+      event_level = "second"
+    ) |>
+      mutate(Model = x)
+  })
+)
+head(ROC_DATA)
+```
+
+```{r}
+# COMBINED ROC CURVE
+ggplot(ROC_DATA, aes(x = 1 - specificity, y = sensitivity, color = Model)) +
+  geom_path(linewidth = 1) +
+  geom_abline(lty = 2) +
+  labs(
+    title = "ROC CURVES FOR ALL MODELS",
+    x = "FALSE POSITIVE RATE",
+    y = "TRUE POSITIVE RATE"
+  )
+```
+
+**SEPERATE ROC CURVES**
+
+As we can see these separate plots make it easier to look at each model one by one. Boosted C5.0 shows one of the strongest curves and stays well above the diagonal line. Logistic Regression and LASSO also perform very well. Random Forest k Nearest Neighbors Neural Network and Naive Bayes all show useful prediction ability but they are a little weaker. The Null Model is the weakest because it stays close to the diagonal.
+
+```{r}
+# SEPERATE ROC CURVES
+ggplot(ROC_DATA, aes(x = 1 - specificity, y = sensitivity, color = Model)) +
+  geom_path(linewidth = 1) +
+  geom_abline(lty = 2) +
+  facet_wrap(~ Model) +
+  labs(
+    title = "ROC CURVE FOR EACH MODEL",
+    x = "FALSE POSITIVE RATE",
+    y = "TRUE POSITIVE RATE"
+  ) +
+  theme(legend.position = "none")
+```
+
+**MODEL PERFORMANCE COMPARISION PLOT**
+
+The plot compares Accuracy Precision Recall F1 Score and ROC AUC for every model. Boosted C5.0 has the best overall performance in the final results. It has the highest overall ranking when ROC AUC is used as the main metric. Logistic Regression and LASSO are also strong models and perform close to the best model. The Null Model is the weakest because it predicts the majority class and does not detect churn well.
+
+```{r}
+METRICS_LONG <- METRICES_ALL |>
+  pivot_longer(
+    cols = c(Accuracy, Precision, Recall, `F1 Score`, `ROC AUC`),
+    names_to = "Metric",
+    values_to = "Value"
+  )
+
+ggplot(METRICS_LONG, aes(x = Model, y = Value, fill = Metric)) +
+  geom_col(position = "dodge") +
+  coord_flip() +
+  labs(
+    title = "MODEL PERFORMANCE COMPARISION",
+    x = "MODEL",
+    y = "VALUE"
+  )
+```
+
+**CONFUSION MATRIX PLOT**
+
+This plot shows how many customers each model classified correctly and incorrectly. Boosted C5.0 and Logistic Regression both do a good job of identifying customers in both classes. Naive Bayes finds more churn cases than some other models but it also makes more mistakes on customers who did not churn. The Null Model predicts almost all customers as non churn so it misses most churn cases. Overall the better models have more correct predictions in both classes and fewer errors.
+
+```{r}
+CM_ALL <- bind_rows(
+  lapply(names(MODEL_RESULTS), function(x) {
+    as.data.frame(MODEL_RESULTS[[x]]$confusion$table) |>
+      mutate(Model = x)
+  })
+)
+
+ggplot(CM_ALL, aes(x = Truth, y = Prediction, fill = Freq)) +
+  geom_tile() +
+  geom_text(aes(label = Freq), color = "white", size = 4) +
+  facet_wrap(~ Model) +
+  labs(
+    title = "CONFUSION MATRIX FOR EACH MODEL",
+    x = "ACTUAL CLASS",
+    y = "PREDICTED CLASS"
+  )
+```
+
+## STEP 5 : CHOOSING THE BEST MODEL AND USING RESULTS
+
+Based on the comparison table the best model is Boosted C5.0. The prediction file was created for the hold out test set. This file includes the customer ID, the predicted churn class, and the predicted probability of churn. For example, a customer with a churn probability close to 0.77 is much more likely to churn than a customer with a probability around 0.34. These probabilities are useful because they show not only the predicted class but also how confident the model is.
+
+```{r}
+BEST_MODEL <- METRICES_ALL$Model[1]
+BEST_CM <- MODEL_RESULTS[[BEST_MODEL]]$confusion
+BEST_MODEL
+BEST_CM
+
+BEST_CM_TABLE <- as.data.frame(BEST_CM$table)
+
+tn <- BEST_CM_TABLE$Freq[BEST_CM_TABLE$Prediction == "No"  & BEST_CM_TABLE$Truth == "No"]
+fn <- BEST_CM_TABLE$Freq[BEST_CM_TABLE$Prediction == "No"  & BEST_CM_TABLE$Truth == "Yes"]
+fp <- BEST_CM_TABLE$Freq[BEST_CM_TABLE$Prediction == "Yes" & BEST_CM_TABLE$Truth == "No"]
+tp <- BEST_CM_TABLE$Freq[BEST_CM_TABLE$Prediction == "Yes" & BEST_CM_TABLE$Truth == "Yes"]
+
+cat(
+  paste(
+    "Based on the comparison table the best model is", BEST_MODEL, ".",
+    "The confusion matrix shows that this model correctly predicted",
+    tn, "customers as No churn and",
+    tp, "customers as Yes churn.",
+    "It incorrectly classified",
+    fn, "churn cases as No churn and",
+    fp, "non churn cases as Yes churn."
+  )
+)
+```
+
+```{r}
+PREDICTION_OUTPUT <- MODEL_RESULTS[[BEST_MODEL]]$predictions |>
+  transmute(
+    customerID,
+    predicted_churn = PREDICTED_CHURN,
+    churn_probability = .pred_Yes
+  )
+
+write_csv(PREDICTION_OUTPUT, "customer_churn_test_predictions.csv")
+
+head(PREDICTION_OUTPUT)
+```
+
+This dataset does not include a separate test file. Because of that I created the prediction file using the 20 percent hold out test set from the train test split.\
+
+```{r}
+BEST_CM_TABLE <- as.data.frame(BEST_CM$table)
+
+ggplot(BEST_CM_TABLE, aes(x = Truth, y = Prediction, fill = Freq)) +
+  geom_tile() +
+  geom_text(aes(label = Freq), color = "white", size = 5) +
+  labs(
+    title = paste("CONFUSION MATRIX FOR", BEST_MODEL),
+    x = "ACTUAL CLASS",
+    y = "PREDICTED CLASS"
+  )
+```
+
+## FINAL ANSWER
+
+The visualizations and model summaries support the results from the comparison table. Boosted C5.0 performed best overall and showed the strongest balance across the ROC curve, the metric comparison plot, and the confusion matrix. This is why it was selected as the final model.
+
+Also the dataset meets the requirement of a binary response variable and more than 100 observations
+
+-   The analysis is organized using the five step process.
+-   The project fits all class models used in your course list: Null Model, Logistic Regression, Regularized Logistic Regression (LASSO), k-NN, Neural Network, Random Forest, Boosted C5.0, and Naive Bayes.
+-   The comparison table reports accuracy, precision, recall, F1 score, and ROC AUC for every model.
+-   The best model name is Boosted C5.0
+-   The file customer_churn_test_predictions.csv is created.
